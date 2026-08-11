@@ -16,6 +16,21 @@ dist-ssr
 .nitro
 *.local
 
+# Environment variables / secrets
+.env
+.env.*
+!.env.example
+
+# Caches
+.vite/
+.cache/
+.eslintcache
+
+# Coverage / test output
+coverage/
+playwright-report/
+test-results/
+
 # Wrangler / Cloudflare
 .wrangler/
 .dev.vars

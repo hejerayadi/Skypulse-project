@@ -7,7 +7,7 @@ from app.models.telemetry import (
     AcousticTelemetry,
     SystemStatusTelemetry,
 )
-from app.services.telemetry_service import generate_telemetry_series
+from app.services.telemetry_service import get_sensor_series
 from app.database import (
     save_raw_document,
     save_denoised_document
@@ -79,7 +79,8 @@ async def receive_telemetry(request: Request):
 async def get_telemetry(
     sensor_id: str,
     samples: int = Query(60, ge=1, le=300),
-    interval_ms: int = Query(1000, ge=200, le=10000),
 ):
-    # For now we synthesize a series so the frontend can treat the backend like a live telemetry source.
-    return generate_telemetry_series(sensor_id=sensor_id, samples=samples, interval_ms=interval_ms)
+    try:
+        return get_sensor_series(sensor_id=sensor_id, samples=samples)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
