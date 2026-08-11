@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic_core import ValidationError
+from starlette.concurrency import run_in_threadpool
 
 from app.models.telemetry import (
     EnvironmentTelemetry,
@@ -8,6 +9,7 @@ from app.models.telemetry import (
     SystemStatusTelemetry,
 )
 from app.services.telemetry_service import get_sensor_series
+from app.services.node_service import get_fleet, record_node_state
 from app.database import (
     save_raw_document,
     save_denoised_document
@@ -32,7 +34,24 @@ async def receive_telemetry(request: Request):
 
     data = await request.json()
 
+    # Storing a packet is entirely blocking CouchDB I/O. Run it off the event
+    # loop: inline, a single slow write stalls every other request, and at the
+    # ~7 packets/second the nodes emit the server stops accepting connections
+    # altogether.
+    return await run_in_threadpool(_store_telemetry, data)
+
+
+def _store_telemetry(data: dict):
+
     print("Received:", data)
+
+    # Identity, GPS, battery and health only exist on the outer envelope, so the
+    # fleet map has to be fed before we drop down into the sensor reading.
+    # A failure here must not cost us the telemetry itself.
+    try:
+        record_node_state(data)
+    except Exception as e:
+        print("Failed to record node state:", e)
 
     # Node-RED sends telemetry under "sensors"
     if "sensors" in data:
@@ -75,8 +94,15 @@ async def receive_telemetry(request: Request):
         "device_id": telemetry.device_id
     }
 
+# Declared sync on purpose: FastAPI runs sync endpoints in a threadpool, so the
+# blocking CouchDB reads below can't block the event loop.
+@router.get("/nodes")
+def get_nodes():
+    return get_fleet()
+
+
 @router.get("/telemetry/{sensor_id}")
-async def get_telemetry(
+def get_telemetry(
     sensor_id: str,
     samples: int = Query(60, ge=1, le=300),
 ):

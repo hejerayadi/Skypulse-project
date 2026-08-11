@@ -127,6 +127,59 @@ class SystemStatusTelemetry(TelemetryEvent):
 
 
 # ==========================================================
+# Node Models
+# ==========================================================
+
+class NodeBattery(BaseModel):
+    percentage: float | None = None
+    charging: bool = False
+
+
+class NodeHealth(BaseModel):
+    status: str = "unknown"
+    online: bool = True
+
+
+class NodeEnvelope(BaseModel):
+    """
+    Outer payload the gateway wraps around every sensor reading. The sensor
+    models below only describe the reading itself, so identity, GPS fix,
+    battery and health live here.
+    """
+
+    node_id: str
+    timestamp: datetime
+    location: Location | None = None
+    battery: NodeBattery | None = None
+    health: NodeHealth | None = None
+
+
+class NodeStatus(BaseModel):
+    """
+    A node as the fleet map sees it: last known position plus a single
+    state the UI can colour a marker with.
+    """
+
+    node_id: str
+    state: Literal["online", "degraded", "offline"]
+    reason: str
+    reported_status: str
+    last_seen: datetime
+    seconds_since_seen: float
+    location: Location | None = None
+    battery: NodeBattery | None = None
+    last_event_type: str | None = None
+
+
+class NodeFleet(BaseModel):
+    nodes: list[NodeStatus]
+    online: int
+    degraded: int
+    offline: int
+    generated_at: datetime
+
+
+# ==========================================================
 # Dashboard Models (for frontend charts)
 # ==========================================================
 

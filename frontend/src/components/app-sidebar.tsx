@@ -1,5 +1,5 @@
 import { Link, useRouterState, useNavigate } from "@tanstack/react-router";
-import { LayoutDashboard, LogOut, Moon, Sun, Satellite } from "lucide-react";
+import { LayoutDashboard, LogOut, Map, Moon, Sun, Satellite } from "lucide-react";
 import {
   Sidebar,
   SidebarContent,
@@ -63,6 +63,14 @@ export function AppSidebar() {
                   <Link to="/dashboard">
                     <LayoutDashboard className="h-4 w-4" />
                     <span>All sensors</span>
+                  </Link>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              <SidebarMenuItem>
+                <SidebarMenuButton asChild isActive={isActive("/dashboard/nodes")} tooltip="Node map">
+                  <Link to="/dashboard/nodes">
+                    <Map className="h-4 w-4" />
+                    <span>Node map</span>
                   </Link>
                 </SidebarMenuButton>
               </SidebarMenuItem>

@@ -1,0 +1,208 @@
+import { createFileRoute } from "@tanstack/react-router";
+import { useMemo, useState } from "react";
+import { BatteryCharging, MapPin, Zap } from "lucide-react";
+import { NodeMap } from "@/components/node-map";
+import { useNodeFleet } from "@/hooks/use-node-fleet";
+import {
+  NODE_STATE_STYLE,
+  formatAge,
+  formatCoordinates,
+  groupNodesBySite,
+  nodeRole,
+  type NodeSite,
+  type NodeStatus,
+} from "@/lib/nodes";
+
+export const Route = createFileRoute("/_authenticated/dashboard/nodes")({
+  component: NodesPage,
+});
+
+function NodesPage() {
+  const { fleet, loading, error } = useNodeFleet(5000);
+  const [focusSiteKey, setFocusSiteKey] = useState<string | null>(null);
+
+  const sites = useMemo(() => groupNodesBySite(fleet.nodes), [fleet.nodes]);
+  const unplaced = useMemo(() => fleet.nodes.filter((node) => !node.location), [fleet.nodes]);
+
+  return (
+    <div className="mx-auto max-w-6xl space-y-6">
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Node map</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Nodes sharing a GPS fix are grouped as one site.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Count label="Healthy" value={fleet.online} color={NODE_STATE_STYLE.online.color} />
+          <Count label="Degraded" value={fleet.degraded} color={NODE_STATE_STYLE.degraded.color} />
+          <Count label="Offline" value={fleet.offline} color={NODE_STATE_STYLE.offline.color} />
+        </div>
+      </div>
+
+      {error && (
+        <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+          {error} — showing the last known fleet state.
+        </div>
+      )}
+
+      <div
+        className="rounded-2xl border border-border/60 bg-card p-3"
+        style={{ boxShadow: "var(--shadow-elegant)" }}
+      >
+        <NodeMap sites={sites} focusSiteKey={focusSiteKey} onSelect={setFocusSiteKey} />
+      </div>
+
+      <div>
+        <div className="mb-3 flex items-center justify-between">
+          <h2 className="text-sm font-medium">Site health</h2>
+          <span className="text-xs text-muted-foreground">Refreshes every 5 s</span>
+        </div>
+
+        {fleet.nodes.length === 0 ? (
+          <div className="rounded-2xl border border-dashed border-border/60 px-6 py-12 text-center text-sm text-muted-foreground">
+            {loading ? "Loading nodes…" : "No node has reported yet. Nodes appear here as soon as telemetry arrives."}
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {sites.map((site) => (
+              <SiteCard
+                key={site.key}
+                site={site}
+                selected={site.key === focusSiteKey}
+                onSelect={() => setFocusSiteKey(site.key)}
+              />
+            ))}
+
+            {unplaced.length > 0 && (
+              <div className="rounded-2xl border border-dashed border-border/60 px-4 py-3 text-xs text-muted-foreground">
+                {unplaced.length} node{unplaced.length === 1 ? "" : "s"} without a GPS fix, so not placed on the map:{" "}
+                {unplaced.map((node) => node.node_id).join(", ")}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SiteCard({
+  site,
+  selected,
+  onSelect,
+}: {
+  site: NodeSite;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  const style = NODE_STATE_STYLE[site.state];
+
+  return (
+    <section
+      className={`rounded-2xl border bg-card transition-all ${
+        selected ? "border-primary/70 ring-1 ring-primary/40" : "border-border/60"
+      }`}
+      style={{ boxShadow: "var(--shadow-elegant)" }}
+    >
+      <button
+        type="button"
+        onClick={onSelect}
+        className="flex w-full flex-wrap items-center justify-between gap-3 border-b border-border/60 px-5 py-4 text-left"
+      >
+        <div className="flex min-w-0 items-center gap-2">
+          <span
+            className="h-2.5 w-2.5 shrink-0 rounded-full"
+            style={{ background: style.color, boxShadow: `0 0 0 3px ${style.color}25` }}
+          />
+          <div className="min-w-0">
+            <div className="truncate text-sm font-medium">
+              {site.nodes.length} node{site.nodes.length === 1 ? "" : "s"} at this site
+            </div>
+            <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+              <MapPin className="h-3 w-3 shrink-0" />
+              <span className="truncate">{formatCoordinates(site.nodes[0].location)}</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex shrink-0 items-center gap-1.5">
+          {site.online > 0 && <Pill state="online" count={site.online} />}
+          {site.degraded > 0 && <Pill state="degraded" count={site.degraded} />}
+          {site.offline > 0 && <Pill state="offline" count={site.offline} />}
+        </div>
+      </button>
+
+      <ul className="divide-y divide-border/40">
+        {site.nodes.map((node) => (
+          <NodeRow key={node.node_id} node={node} />
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function NodeRow({ node }: { node: NodeStatus }) {
+  const style = NODE_STATE_STYLE[node.state];
+  const battery = node.battery?.percentage ?? null;
+
+  return (
+    <li className="flex flex-wrap items-center gap-x-4 gap-y-2 px-5 py-3">
+      <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: style.color }} />
+
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-sm font-medium">{node.node_id}</div>
+        {/* What this node actually contributes — the id alone says nothing. */}
+        <div className="truncate text-[11px] text-muted-foreground">{nodeRole(node)}</div>
+      </div>
+
+      <div className="text-right text-[11px] text-muted-foreground">
+        <div style={{ color: style.color }}>{style.label}</div>
+        <div className="tabular-nums">{formatAge(node.seconds_since_seen)}</div>
+      </div>
+
+      <div className="flex w-24 shrink-0 items-center gap-1.5">
+        {node.battery?.charging ? (
+          <BatteryCharging className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+        ) : (
+          <Zap className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+        )}
+        {battery === null ? (
+          <span className="text-[11px] text-muted-foreground">—</span>
+        ) : (
+          <>
+            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
+              <div
+                className="h-full rounded-full transition-all"
+                style={{ width: `${Math.max(0, Math.min(100, battery))}%`, background: style.color }}
+              />
+            </div>
+            <span className="text-[11px] tabular-nums text-muted-foreground">{battery.toFixed(0)}%</span>
+          </>
+        )}
+      </div>
+    </li>
+  );
+}
+
+function Pill({ state, count }: { state: keyof typeof NODE_STATE_STYLE; count: number }) {
+  const style = NODE_STATE_STYLE[state];
+  return (
+    <span
+      className="rounded-full px-2 py-0.5 text-[11px] font-medium"
+      style={{ background: `${style.color}1f`, color: style.color }}
+    >
+      {count} {style.label}
+    </span>
+  );
+}
+
+function Count({ label, value, color }: { label: string; value: number; color: string }) {
+  return (
+    <div className="flex items-center gap-2 rounded-xl border border-border/60 bg-card px-3 py-2">
+      <span className="h-2 w-2 rounded-full" style={{ background: color }} />
+      <span className="text-sm font-semibold tabular-nums">{value}</span>
+      <span className="text-[11px] text-muted-foreground">{label}</span>
+    </div>
+  );
+}

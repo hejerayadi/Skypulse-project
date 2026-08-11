@@ -15,6 +15,7 @@ import { Route as AuthRouteImport } from './routes/auth'
 import { Route as AuthenticatedDashboardRouteImport } from './routes/_authenticated/dashboard'
 import { Route as AuthenticatedDashboardIndexRouteImport } from './routes/_authenticated/dashboard.index'
 import { Route as AuthenticatedDashboardSensorRouteImport } from './routes/_authenticated/dashboard.$sensor'
+import { Route as AuthenticatedDashboardNodesRouteImport } from './routes/_authenticated/dashboard.nodes'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -47,18 +48,26 @@ const AuthenticatedDashboardSensorRoute =
     path: '/$sensor',
     getParentRoute: () => AuthenticatedDashboardRoute,
   } as any)
+const AuthenticatedDashboardNodesRoute =
+  AuthenticatedDashboardNodesRouteImport.update({
+    id: '/nodes',
+    path: '/nodes',
+    getParentRoute: () => AuthenticatedDashboardRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/auth': typeof AuthRoute
   '/dashboard': typeof AuthenticatedDashboardRouteWithChildren
   '/dashboard/$sensor': typeof AuthenticatedDashboardSensorRoute
+  '/dashboard/nodes': typeof AuthenticatedDashboardNodesRoute
   '/dashboard/': typeof AuthenticatedDashboardIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/auth': typeof AuthRoute
   '/dashboard/$sensor': typeof AuthenticatedDashboardSensorRoute
+  '/dashboard/nodes': typeof AuthenticatedDashboardNodesRoute
   '/dashboard': typeof AuthenticatedDashboardIndexRoute
 }
 export interface FileRoutesById {
@@ -68,13 +77,20 @@ export interface FileRoutesById {
   '/auth': typeof AuthRoute
   '/_authenticated/dashboard': typeof AuthenticatedDashboardRouteWithChildren
   '/_authenticated/dashboard/$sensor': typeof AuthenticatedDashboardSensorRoute
+  '/_authenticated/dashboard/nodes': typeof AuthenticatedDashboardNodesRoute
   '/_authenticated/dashboard/': typeof AuthenticatedDashboardIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/auth' | '/dashboard' | '/dashboard/$sensor' | '/dashboard/'
+  fullPaths:
+    | '/'
+    | '/auth'
+    | '/dashboard'
+    | '/dashboard/$sensor'
+    | '/dashboard/nodes'
+    | '/dashboard/'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/auth' | '/dashboard/$sensor' | '/dashboard'
+  to: '/' | '/auth' | '/dashboard/$sensor' | '/dashboard/nodes' | '/dashboard'
   id:
     | '__root__'
     | '/'
@@ -82,6 +98,7 @@ export interface FileRouteTypes {
     | '/auth'
     | '/_authenticated/dashboard'
     | '/_authenticated/dashboard/$sensor'
+    | '/_authenticated/dashboard/nodes'
     | '/_authenticated/dashboard/'
   fileRoutesById: FileRoutesById
 }
@@ -135,17 +152,26 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedDashboardSensorRouteImport
       parentRoute: typeof AuthenticatedDashboardRoute
     }
+    '/_authenticated/dashboard/nodes': {
+      id: '/_authenticated/dashboard/nodes'
+      path: '/nodes'
+      fullPath: '/dashboard/nodes'
+      preLoaderRoute: typeof AuthenticatedDashboardNodesRouteImport
+      parentRoute: typeof AuthenticatedDashboardRoute
+    }
   }
 }
 
 interface AuthenticatedDashboardRouteChildren {
   AuthenticatedDashboardSensorRoute: typeof AuthenticatedDashboardSensorRoute
+  AuthenticatedDashboardNodesRoute: typeof AuthenticatedDashboardNodesRoute
   AuthenticatedDashboardIndexRoute: typeof AuthenticatedDashboardIndexRoute
 }
 
 const AuthenticatedDashboardRouteChildren: AuthenticatedDashboardRouteChildren =
   {
     AuthenticatedDashboardSensorRoute: AuthenticatedDashboardSensorRoute,
+    AuthenticatedDashboardNodesRoute: AuthenticatedDashboardNodesRoute,
     AuthenticatedDashboardIndexRoute: AuthenticatedDashboardIndexRoute,
   }
 

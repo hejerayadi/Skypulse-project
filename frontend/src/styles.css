@@ -155,3 +155,34 @@
     color: var(--color-foreground);
   }
 }
+
+/* Leaflet draws into a surface it owns and ships its own light-only stylesheet,
+   so the app theme has to be pushed onto it from the outside. */
+.skypulse-map {
+  z-index: 0;
+  overflow: hidden;
+  background: var(--muted);
+  font: inherit;
+}
+
+.skypulse-map .leaflet-container {
+  font: inherit;
+  background: var(--muted);
+}
+
+.skypulse-map .leaflet-control-zoom a,
+.skypulse-map .leaflet-control-attribution {
+  background: var(--card);
+  color: var(--muted-foreground);
+  border-color: var(--border);
+}
+
+.skypulse-map .leaflet-control-attribution a {
+  color: var(--primary);
+}
+
+/* OSM only publishes light tiles; inverting them is the standard way to get a
+   dark basemap without paying for a styled tile provider. */
+.skypulse-map--dark .leaflet-tile {
+  filter: invert(1) hue-rotate(180deg) brightness(0.92) contrast(0.9) saturate(0.7);
+}
