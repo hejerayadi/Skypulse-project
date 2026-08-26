@@ -13,7 +13,6 @@ import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
 import { Toaster } from "@/components/ui/sonner";
 import { ThemeProvider } from "@/components/theme-provider";
-import { supabase } from "@/integrations/supabase/client";
 
 function NotFoundComponent() {
   return (
@@ -119,16 +118,10 @@ function RootShell({ children }: { children: ReactNode }) {
 
 function RootComponent() {
   const { queryClient } = Route.useRouteContext();
-  const router = useRouter();
 
-  useEffect(() => {
-    const { data: sub } = supabase.auth.onAuthStateChange((event) => {
-      if (event !== "SIGNED_IN" && event !== "SIGNED_OUT" && event !== "USER_UPDATED") return;
-      router.invalidate();
-    });
-    return () => sub.subscription.unsubscribe();
-  }, [router]);
-
+  // No auth subscription here any more: the session lives in httpOnly cookies
+  // that this bundle cannot observe. Sign-in and sign-out both navigate, and
+  // _authenticated/route.tsx re-asks the backend on the way through.
   return (
     <QueryClientProvider client={queryClient}>
       <ThemeProvider>

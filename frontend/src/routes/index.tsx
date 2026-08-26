@@ -1,6 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import { fetchCurrentUser } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
 import { Satellite, Radio, Activity, Sparkles } from "lucide-react";
 
@@ -11,7 +11,9 @@ export const Route = createFileRoute("/")({
 function Landing() {
   const [authed, setAuthed] = useState(false);
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => setAuthed(!!data.session));
+    // Only decides which label the buttons get — the real gate is the backend
+    // check in _authenticated/route.tsx.
+    fetchCurrentUser().then((user) => setAuthed(user !== null));
   }, []);
 
   return (

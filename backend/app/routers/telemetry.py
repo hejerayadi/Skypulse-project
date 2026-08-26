@@ -1,36 +1,23 @@
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic_core import ValidationError
 from starlette.concurrency import run_in_threadpool
 
-from app.models.telemetry import (
-    EnvironmentTelemetry,
-    MotionTelemetry,
-    AcousticTelemetry,
-    SystemStatusTelemetry,
-)
+from app import mongo, mqtt
+from app.database import get_document_counts
+from app.services.ingest_service import TelemetryRejected, ingest_packet
+from app.services.node_service import get_fleet
 from app.services.telemetry_service import get_sensor_series
-from app.services.node_service import get_fleet, record_node_state
-from app.database import (
-    save_raw_document,
-    save_denoised_document
-)
-from app.services.denoising_service import apply_denoising
 
 
 router = APIRouter()
 
-# Maps each event_type discriminator to the model that should validate it,
-# since FastAPI can't infer the right Pydantic model from a plain dict body.
-MODEL_REGISTRY = {
-    "environment": EnvironmentTelemetry,
-    "motion": MotionTelemetry,
-    "acoustic": AcousticTelemetry,
-    "status": SystemStatusTelemetry
-}
-
 
 @router.post("/telemetry")
 async def receive_telemetry(request: Request):
+    """
+    HTTP ingest. Node-RED now publishes over MQTT instead (see app/mqtt.py), but
+    this stays the way a sensor, a curl, or the frontend can push a packet
+    directly — both paths run the same ingest_packet() pipeline.
+    """
 
     data = await request.json()
 
@@ -38,61 +25,27 @@ async def receive_telemetry(request: Request):
     # loop: inline, a single slow write stalls every other request, and at the
     # ~7 packets/second the nodes emit the server stops accepting connections
     # altogether.
-    return await run_in_threadpool(_store_telemetry, data)
-
-
-def _store_telemetry(data: dict):
-
-    print("Received:", data)
-
-    # Identity, GPS, battery and health only exist on the outer envelope, so the
-    # fleet map has to be fed before we drop down into the sensor reading.
-    # A failure here must not cost us the telemetry itself.
     try:
-        record_node_state(data)
-    except Exception as e:
-        print("Failed to record node state:", e)
+        return await run_in_threadpool(ingest_packet, data, "http")
+    except TelemetryRejected as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
 
-    # Node-RED sends telemetry under "sensors"
-    if "sensors" in data:
-        data = data["sensors"]
 
-    event_type = data.get("event_type")
-
-    if not event_type:
-        raise HTTPException(
-            status_code=400,
-            detail="Missing event_type"
-        )
-
-    model = MODEL_REGISTRY.get(event_type)
-
-    if model is None:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unknown event type: {event_type}"
-        )
-
-    try:
-        telemetry = model(**data)
-    except ValidationError as e:
-        raise HTTPException(
-            status_code=422,
-            detail=e.errors()
-        )
-
-    document = telemetry.model_dump(mode="json")
-
-    denoised_document = apply_denoising(document.copy())
-
-    save_raw_document(document)
-    save_denoised_document(denoised_document)
+@router.get("/storage")
+def get_storage():
+    """
+    Document counts in both stores, so you can see whether telemetry is still
+    landing. Poll it twice and compare: a rising count means data is flowing.
+    """
 
     return {
-        "message": "Telemetry stored successfully",
-        "event_type": telemetry.event_type,
-        "device_id": telemetry.device_id
+        "couchdb": get_document_counts(),
+        "mongodb": mongo.stats(),
+        # Where the packets are coming in from now — a connected broker with a
+        # rising "received" is the MQTT equivalent of the counts above.
+        "mqtt": mqtt.stats(),
     }
+
 
 # Declared sync on purpose: FastAPI runs sync endpoints in a threadpool, so the
 # blocking CouchDB reads below can't block the event loop.

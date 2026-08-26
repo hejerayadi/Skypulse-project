@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
 import { BatteryCharging, MapPin, Zap } from "lucide-react";
-import { NodeMap } from "@/components/node-map";
+import { Station3D } from "@/components/station-3d";
 import { useNodeFleet } from "@/hooks/use-node-fleet";
 import {
   NODE_STATE_STYLE,
@@ -19,7 +19,7 @@ export const Route = createFileRoute("/_authenticated/dashboard/nodes")({
 
 function NodesPage() {
   const { fleet, loading, error } = useNodeFleet(5000);
-  const [focusSiteKey, setFocusSiteKey] = useState<string | null>(null);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
   const sites = useMemo(() => groupNodesBySite(fleet.nodes), [fleet.nodes]);
   const unplaced = useMemo(() => fleet.nodes.filter((node) => !node.location), [fleet.nodes]);
@@ -28,9 +28,9 @@ function NodesPage() {
     <div className="mx-auto max-w-6xl space-y-6">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Node map</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">Ground station</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Nodes sharing a GPS fix are grouped as one site.
+            The dish tracks whichever node last reported. Drag to orbit, scroll to zoom.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -50,7 +50,11 @@ function NodesPage() {
         className="rounded-2xl border border-border/60 bg-card p-3"
         style={{ boxShadow: "var(--shadow-elegant)" }}
       >
-        <NodeMap sites={sites} focusSiteKey={focusSiteKey} onSelect={setFocusSiteKey} />
+        <Station3D
+          nodes={fleet.nodes}
+          selectedNodeId={selectedNodeId}
+          onSelect={setSelectedNodeId}
+        />
       </div>
 
       <div>
@@ -61,7 +65,9 @@ function NodesPage() {
 
         {fleet.nodes.length === 0 ? (
           <div className="rounded-2xl border border-dashed border-border/60 px-6 py-12 text-center text-sm text-muted-foreground">
-            {loading ? "Loading nodes…" : "No node has reported yet. Nodes appear here as soon as telemetry arrives."}
+            {loading
+              ? "Loading nodes…"
+              : "No node has reported yet. Nodes appear here as soon as telemetry arrives."}
           </div>
         ) : (
           <div className="space-y-4">
@@ -69,15 +75,17 @@ function NodesPage() {
               <SiteCard
                 key={site.key}
                 site={site}
-                selected={site.key === focusSiteKey}
-                onSelect={() => setFocusSiteKey(site.key)}
+                selectedNodeId={selectedNodeId}
+                onSelect={setSelectedNodeId}
               />
             ))}
 
             {unplaced.length > 0 && (
               <div className="rounded-2xl border border-dashed border-border/60 px-4 py-3 text-xs text-muted-foreground">
-                {unplaced.length} node{unplaced.length === 1 ? "" : "s"} without a GPS fix, so not placed on the map:{" "}
-                {unplaced.map((node) => node.node_id).join(", ")}
+                {/* The 3D station gives every node a pad whether or not it has a
+                    fix, so these are listed as missing GPS, not as missing. */}
+                {unplaced.length} node{unplaced.length === 1 ? "" : "s"} reporting without a GPS
+                fix: {unplaced.map((node) => node.node_id).join(", ")}
               </div>
             )}
           </div>
@@ -89,14 +97,16 @@ function NodesPage() {
 
 function SiteCard({
   site,
-  selected,
+  selectedNodeId,
   onSelect,
 }: {
   site: NodeSite;
-  selected: boolean;
-  onSelect: () => void;
+  selectedNodeId: string | null;
+  onSelect: (nodeId: string) => void;
 }) {
   const style = NODE_STATE_STYLE[site.state];
+  // A site highlights when the node picked in the 3D view lives here.
+  const selected = site.nodes.some((node) => node.node_id === selectedNodeId);
 
   return (
     <section
@@ -107,7 +117,7 @@ function SiteCard({
     >
       <button
         type="button"
-        onClick={onSelect}
+        onClick={() => onSelect(site.nodes[0].node_id)}
         className="flex w-full flex-wrap items-center justify-between gap-3 border-b border-border/60 px-5 py-4 text-left"
       >
         <div className="flex min-w-0 items-center gap-2">
@@ -135,52 +145,79 @@ function SiteCard({
 
       <ul className="divide-y divide-border/40">
         {site.nodes.map((node) => (
-          <NodeRow key={node.node_id} node={node} />
+          <NodeRow
+            key={node.node_id}
+            node={node}
+            selected={node.node_id === selectedNodeId}
+            onSelect={() => onSelect(node.node_id)}
+          />
         ))}
       </ul>
     </section>
   );
 }
 
-function NodeRow({ node }: { node: NodeStatus }) {
+function NodeRow({
+  node,
+  selected,
+  onSelect,
+}: {
+  node: NodeStatus;
+  selected: boolean;
+  onSelect: () => void;
+}) {
   const style = NODE_STATE_STYLE[node.state];
   const battery = node.battery?.percentage ?? null;
 
   return (
-    <li className="flex flex-wrap items-center gap-x-4 gap-y-2 px-5 py-3">
-      <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: style.color }} />
+    <li>
+      <button
+        type="button"
+        onClick={onSelect}
+        aria-pressed={selected}
+        className={`flex w-full flex-wrap items-center gap-x-4 gap-y-2 px-5 py-3 text-left transition-colors ${
+          selected ? "bg-primary/10" : "hover:bg-muted/40"
+        }`}
+      >
+        <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: style.color }} />
 
-      <div className="min-w-0 flex-1">
-        <div className="truncate text-sm font-medium">{node.node_id}</div>
-        {/* What this node actually contributes — the id alone says nothing. */}
-        <div className="truncate text-[11px] text-muted-foreground">{nodeRole(node)}</div>
-      </div>
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-sm font-medium">{node.node_id}</div>
+          {/* What this node actually contributes — the id alone says nothing. */}
+          <div className="truncate text-[11px] text-muted-foreground">{nodeRole(node)}</div>
+        </div>
 
-      <div className="text-right text-[11px] text-muted-foreground">
-        <div style={{ color: style.color }}>{style.label}</div>
-        <div className="tabular-nums">{formatAge(node.seconds_since_seen)}</div>
-      </div>
+        <div className="text-right text-[11px] text-muted-foreground">
+          <div style={{ color: style.color }}>{style.label}</div>
+          <div className="tabular-nums">{formatAge(node.seconds_since_seen)}</div>
+        </div>
 
-      <div className="flex w-24 shrink-0 items-center gap-1.5">
-        {node.battery?.charging ? (
-          <BatteryCharging className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-        ) : (
-          <Zap className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-        )}
-        {battery === null ? (
-          <span className="text-[11px] text-muted-foreground">—</span>
-        ) : (
-          <>
-            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
-              <div
-                className="h-full rounded-full transition-all"
-                style={{ width: `${Math.max(0, Math.min(100, battery))}%`, background: style.color }}
-              />
-            </div>
-            <span className="text-[11px] tabular-nums text-muted-foreground">{battery.toFixed(0)}%</span>
-          </>
-        )}
-      </div>
+        <div className="flex w-24 shrink-0 items-center gap-1.5">
+          {node.battery?.charging ? (
+            <BatteryCharging className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          ) : (
+            <Zap className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          )}
+          {battery === null ? (
+            <span className="text-[11px] text-muted-foreground">—</span>
+          ) : (
+            <>
+              <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
+                <div
+                  className="h-full rounded-full transition-all"
+                  style={{
+                    width: `${Math.max(0, Math.min(100, battery))}%`,
+                    background: style.color,
+                  }}
+                />
+              </div>
+              <span className="text-[11px] tabular-nums text-muted-foreground">
+                {battery.toFixed(0)}%
+              </span>
+            </>
+          )}
+        </div>
+      </button>
     </li>
   );
 }

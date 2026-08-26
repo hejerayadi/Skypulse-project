@@ -1,11 +1,12 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { Satellite, Loader2 } from "lucide-react";
+
+import { fetchCurrentUser, login, register } from "@/lib/auth";
 
 export const Route = createFileRoute("/auth")({
   head: () => ({
@@ -22,11 +23,14 @@ function AuthPage() {
   const [mode, setMode] = useState<"signin" | "signup">("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [fullName, setFullName] = useState("");
+  const [organization, setOrganization] = useState("");
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => {
-      if (data.session) navigate({ to: "/dashboard" });
+    // Already signed in? The backend still has the cookie, so skip the form.
+    fetchCurrentUser().then((user) => {
+      if (user) navigate({ to: "/dashboard" });
     });
   }, [navigate]);
 
@@ -35,16 +39,27 @@ function AuthPage() {
     setLoading(true);
     try {
       if (mode === "signup") {
-        const { error } = await supabase.auth.signUp({
+        // The backend creates the account in Supabase, assigns the role and
+        // opens the session; this only reports what it said.
+        const session = await register({
           email,
           password,
-          options: { emailRedirectTo: `${window.location.origin}/dashboard` },
+          full_name: fullName.trim() || undefined,
+          organization: organization.trim() || undefined,
         });
-        if (error) throw error;
-        toast.success("Account created. Welcome to SkyPulse.");
+
+        // With "Confirm email" enabled in Supabase there is no session yet —
+        // sending them to the dashboard would just bounce them back here.
+        if (session.email_confirmation_required) {
+          toast.success(`Account created. Check ${session.user.email} for the confirmation link.`);
+          setMode("signin");
+          setPassword("");
+          return;
+        }
+
+        toast.success(`Account created. Welcome to SkyPulse, ${session.user.email}.`);
       } else {
-        const { error } = await supabase.auth.signInWithPassword({ email, password });
-        if (error) throw error;
+        await login({ email, password });
         toast.success("Signed in.");
       }
       navigate({ to: "/dashboard" });
@@ -93,6 +108,30 @@ function AuthPage() {
         </p>
 
         <form onSubmit={submit} className="mt-6 space-y-4">
+          {mode === "signup" && (
+            <>
+              <div className="space-y-2">
+                <Label htmlFor="full-name">Full name</Label>
+                <Input
+                  id="full-name"
+                  autoComplete="name"
+                  value={fullName}
+                  onChange={(e) => setFullName(e.target.value)}
+                  placeholder="Amin Bali"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="organization">Organization</Label>
+                <Input
+                  id="organization"
+                  autoComplete="organization"
+                  value={organization}
+                  onChange={(e) => setOrganization(e.target.value)}
+                  placeholder="IEEE AESS"
+                />
+              </div>
+            </>
+          )}
           <div className="space-y-2">
             <Label htmlFor="email">Email</Label>
             <Input
@@ -111,12 +150,18 @@ function AuthPage() {
               id="password"
               type="password"
               required
-              minLength={6}
               autoComplete={mode === "signin" ? "current-password" : "new-password"}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               placeholder="••••••••"
             />
+            {mode === "signup" && (
+              // A hint, not a check — the rule that counts is enforced in
+              // backend/app/authentification/models.py.
+              <p className="text-xs text-muted-foreground">
+                At least 8 characters, with one letter and one digit.
+              </p>
+            )}
           </div>
           <Button type="submit" className="w-full" disabled={loading}>
             {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : mode === "signin" ? "Sign in" : "Create account"}

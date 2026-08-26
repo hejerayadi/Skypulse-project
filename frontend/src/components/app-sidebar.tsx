@@ -14,7 +14,7 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import { SENSORS } from "@/lib/sensors";
-import { supabase } from "@/integrations/supabase/client";
+import { logout } from "@/lib/auth";
 import { useTheme } from "@/components/theme-provider";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
@@ -29,7 +29,9 @@ export function AppSidebar() {
   const isActive = (path: string) => pathname === path;
 
   async function signOut() {
-    await supabase.auth.signOut();
+    // The backend revokes the session and clears the cookies; there is no
+    // client-side session state left to tidy up here.
+    await logout();
     toast.success("Signed out");
     navigate({ to: "/auth" });
   }

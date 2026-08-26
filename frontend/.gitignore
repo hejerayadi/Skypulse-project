@@ -35,6 +35,11 @@ test-results/
 .wrangler/
 .dev.vars
 
+# Raw 3D source assets. The 34 MB Sketchfab export of the antenna lives here;
+# only the optimised 1.6 MB build in public/models/ belongs in the repo, and a
+# binary that size is effectively permanent once it reaches git history.
+src/3d model/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

@@ -3,5 +3,18 @@ uvicorn[standard]
 pydantic
 python-dotenv
 CouchDB
+pymongo
+# Resolves the mongodb+srv:// SRV records the Atlas URI uses.
+dnspython
 scipy
 numpy
+# Authentication against Supabase. No password hashing here — Supabase Auth
+# holds the passwords; the backend only verifies the tokens it issues.
+# PyJWT[crypto] pulls in `cryptography`, which the ES256 signature check needs.
+PyJWT[crypto]
+httpx
+email-validator
+
+# MQTT ingest: Node-RED publishes telemetry to Mosquitto and
+# app/mqtt.py subscribes to it.
+paho-mqtt

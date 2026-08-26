@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from app.database import denoised_db, get_latest_by_event_type
+from app.database import get_denoised_db, get_latest_by_event_type
 from app.models.telemetry import TelemetryPoint, TelemetrySeries
 
 
@@ -46,7 +46,10 @@ def get_sensor_series(sensor_id: str, samples: int = 60) -> TelemetrySeries:
 
 	# Devices aren't distinguished in the dashboard, so this merges every
 	# device's readings for the sensor into one chronological series.
-	docs = get_latest_by_event_type(denoised_db, mapping["event_type"], limit=samples)
+	# Resolved per call rather than imported: the connection is opened on first
+	# use, so holding a module-level handle would reintroduce the import-time
+	# connect this was moved away from.
+	docs = get_latest_by_event_type(get_denoised_db(), mapping["event_type"], limit=samples)
 
 	points: list[TelemetryPoint] = []
 	unit = ""

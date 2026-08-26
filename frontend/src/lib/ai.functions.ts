@@ -1,5 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
-import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
+import { requireAuth } from "@/lib/auth.middleware";
 
 type ChatMsg = { role: "system" | "user" | "assistant"; content: string };
 
@@ -42,7 +42,7 @@ function summarize(arr: number[]) {
 }
 
 export const interpretSensor = createServerFn({ method: "POST" })
-  .middleware([requireSupabaseAuth])
+  .middleware([requireAuth])
   .inputValidator((raw: unknown) => {
     const input = raw as { sensor: string; unit: string; recent: number[] };
     if (!input?.sensor || !Array.isArray(input.recent)) throw new Error("Invalid payload");
@@ -68,7 +68,7 @@ In 2-3 concise sentences, interpret the variation for a mission operator: note t
   });
 
 export const chatWithCopilot = createServerFn({ method: "POST" })
-  .middleware([requireSupabaseAuth])
+  .middleware([requireAuth])
   .inputValidator((raw: unknown) => {
     const input = raw as { messages: ChatMsg[] };
     if (!Array.isArray(input?.messages)) throw new Error("Invalid payload");
