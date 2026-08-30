@@ -7,7 +7,11 @@ from fastapi.responses import JSONResponse
 from app import mongo, mqtt
 from app.authentification import service as auth_service
 from app.authentification.router import router as auth_router
+from app.ai import client as ai_client
 from app.database import CouchDBUnavailable, is_connected
+from app.rf_fault import stream as rf_stream
+from app.routers.ai import router as ai_router
+from app.routers.rf_fault import router as rf_fault_router
 from app.routers.telemetry import router as telemetry_router
 
 
@@ -37,7 +41,18 @@ async def lifespan(app: FastAPI):
     # while /api/telemetry carries on serving HTTP ingest.
     mqtt.start()
 
+    # RF fault detection. Started inside the lifespan rather than at import so
+    # it can capture this event loop for the SSE fan-out, and so a model that
+    # fails to load costs a warning rather than the whole app.
+    rf_stream.start()
+
+    # Reported, not required. A missing Groq key costs the interpretation
+    # panels and nothing else, so it is logged here rather than raised.
+    ai_client.load()
+
     yield
+
+    rf_stream.stop()
 
     # Stop consuming before the stores close, so no packet is pulled off the
     # broker that we are no longer able to write.
@@ -83,5 +98,15 @@ app.include_router(
 
 app.include_router(
     telemetry_router,
+    prefix="/api"
+)
+
+app.include_router(
+    rf_fault_router,
+    prefix="/api"
+)
+
+app.include_router(
+    ai_router,
     prefix="/api"
 )

@@ -16,9 +16,14 @@ function Overview() {
         </p>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      <div data-tour="overview-grid" className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {SENSORS.map((sensor) => (
-          <Link key={sensor.id} to="/dashboard/$sensor" params={{ sensor: sensor.id }} className="group focus:outline-none">
+          <Link
+            key={sensor.id}
+            to="/dashboard/$sensor"
+            params={{ sensor: sensor.id }}
+            className="group focus:outline-none"
+          >
             <SensorMiniCard sensor={sensor} />
           </Link>
         ))}

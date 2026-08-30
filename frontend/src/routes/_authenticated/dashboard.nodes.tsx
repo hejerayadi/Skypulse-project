@@ -2,7 +2,11 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
 import { BatteryCharging, MapPin, Zap } from "lucide-react";
 import { Station3D } from "@/components/station-3d";
+import { AINote } from "@/components/ai-note";
 import { useNodeFleet } from "@/hooks/use-node-fleet";
+import { useAIInterpretation } from "@/hooks/use-ai-interpretation";
+import { useRFFault } from "@/hooks/use-rf-fault";
+import { RF_LABEL_STYLE } from "@/lib/rf-fault";
 import {
   NODE_STATE_STYLE,
   formatAge,
@@ -21,6 +25,19 @@ function NodesPage() {
   const { fleet, loading, error } = useNodeFleet(5000);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
+  const { prediction, connected, error: rfError } = useRFFault();
+
+  // Keyed on the fault state rather than on the prediction object, which is a
+  // new one every two seconds. A new label, severity or countdown band is a new
+  // situation and gets a fresh reading; a wobbling probability is not.
+  const situation = prediction
+    ? `${prediction.label}|${prediction.severity}|${etaBand(prediction.eta_seconds)}`
+    : "none";
+
+  // Re-read when the link actually changes state, not on a timer. Refresh by
+  // hand for anything in between.
+  const rfNote = useAIInterpretation(prediction?.window_filled ? "/api/ai/rf" : null, situation);
+
   const sites = useMemo(() => groupNodesBySite(fleet.nodes), [fleet.nodes]);
   const unplaced = useMemo(() => fleet.nodes.filter((node) => !node.location), [fleet.nodes]);
 
@@ -30,7 +47,9 @@ function NodesPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Ground station</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            The dish tracks whichever node last reported. Drag to orbit, scroll to zoom.
+            The dish tracks whichever node last reported, and reacts to the RF fault model: the
+            beacon flashes on an overheating receiver, the antenna is pushed about by wind. Drag to
+            orbit, scroll to zoom.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -54,10 +73,27 @@ function NodesPage() {
           nodes={fleet.nodes}
           selectedNodeId={selectedNodeId}
           onSelect={setSelectedNodeId}
+          prediction={prediction}
+          connected={connected}
+          rfError={rfError}
+        />
+
+        <AINote
+          note={rfNote.note}
+          loading={rfNote.loading}
+          unavailable={rfNote.unavailable}
+          pending={rfNote.pending}
+          onReload={rfNote.reload}
+          label={
+            prediction && prediction.severity !== "nominal"
+              ? `What is happening · ${RF_LABEL_STYLE[prediction.label].short}`
+              : "What is happening"
+          }
+          accent={prediction ? RF_LABEL_STYLE[prediction.label].color : undefined}
         />
       </div>
 
-      <div>
+      <div data-tour="site-health">
         <div className="mb-3 flex items-center justify-between">
           <h2 className="text-sm font-medium">Site health</h2>
           <span className="text-xs text-muted-foreground">Refreshes every 5 s</span>
@@ -93,6 +129,15 @@ function NodesPage() {
       </div>
     </div>
   );
+}
+
+/** Coarse countdown bands, so an ETA ticking down does not re-ask the model
+ *  every two seconds for the same answer. */
+function etaBand(eta: number | null): string {
+  if (eta === null) return "none";
+  if (eta <= 30) return "imminent";
+  if (eta <= 120) return "soon";
+  return "later";
 }
 
 function SiteCard({

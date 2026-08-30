@@ -2,6 +2,7 @@ import { createFileRoute, Outlet } from "@tanstack/react-router";
 import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/app-sidebar";
 import { CopilotBubble } from "@/components/copilot-bubble";
+import { SpotlightOverlay } from "@/components/spotlight-overlay";
 
 export const Route = createFileRoute("/_authenticated/dashboard")({
   component: DashboardLayout,
@@ -26,6 +27,9 @@ function DashboardLayout() {
           </main>
         </div>
         <CopilotBubble />
+        {/* Portalled to <body>, so it dims the whole console rather than
+            just the area inside this layout. */}
+        <SpotlightOverlay />
       </div>
     </SidebarProvider>
   );

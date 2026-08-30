@@ -3,14 +3,7 @@ import { Canvas, useFrame, type ThreeEvent } from "@react-three/fiber";
 import { ContactShadows, Grid, Html, OrbitControls, useGLTF } from "@react-three/drei";
 import * as THREE from "three";
 import { useTheme } from "@/components/theme-provider";
-import { SensorModel } from "@/components/sensor-model";
 import { NODE_STATE_STYLE, formatAge, nodeRole, type NodeStatus } from "@/lib/nodes";
-import {
-  SENSOR_MODELS,
-  sensorKindsInFleet,
-  sensorsForNode,
-  type SensorKind,
-} from "@/lib/sensor-models";
 import {
   ANTENNA_HEIGHT,
   DISH_FOCUS,
@@ -18,6 +11,14 @@ import {
   shortestTurn,
   type NodePlacement,
 } from "@/lib/station-layout";
+import {
+  RF_LABEL_STYLE,
+  formatConfidence,
+  formatEta,
+  thermalUrgency,
+  windIntensity,
+  type RFPrediction,
+} from "@/lib/rf-fault";
 
 const MODEL_URL = "/models/antenna.glb";
 
@@ -40,14 +41,76 @@ const SLEW_SPEED = 1.1;
 /** Seconds a telemetry pulse takes to travel from its pad to the dish. */
 const PULSE_TRAVEL = 1.15;
 
+// ---------------------------------------------------------------------------
+// Weather, driven by the RF fault model
+//
+// Everything below reacts to a prediction rather than running all the time. A
+// scene that always sways teaches the operator to ignore the swaying, so the
+// idle station is deliberately dead still and every bit of motion here means
+// the model saw something.
+// ---------------------------------------------------------------------------
+
+/** Widest the dish is pushed off its target by a full-strength gust, radians. */
+const MAX_WIND_YAW = 0.3;
+/** How far the mast leans downwind at full strength, radians. */
+const MAX_WIND_LEAN = 0.03;
+/** Buffeting on the dish itself — small, or it reads as a mechanical fault. */
+const MAX_WIND_NOD = 0.022;
+
+/** Wind streaks. Enough to read as air moving, few enough to stay cheap. */
+const STREAK_COUNT = 72;
+/** How far a streak travels before it wraps back to the upwind edge. */
+const STREAK_SPAN = 52;
+
+/** Where the warning lamp stands: clear of the mast, inside the pad ring. */
+const LAMP_POSITION: [number, number, number] = [3.2, 0, 0];
+const LAMP_HEIGHT = 1.2;
+
+/**
+ * Gusty pseudo-noise in roughly -1..1.
+ *
+ * Three sines at incommensurable rates rather than a real noise function: it
+ * never repeats on any timescale a viewer will notice, costs three multiplies,
+ * and needs no texture or table. The phase argument decorrelates the yaw, the
+ * lean and the nod so they do not all peak on the same frame.
+ */
+function gust(t: number, phase: number): number {
+  return (
+    0.62 * Math.sin(t * 1.7 + phase) +
+    0.28 * Math.sin(t * 3.3 + phase * 2.1) +
+    0.1 * Math.sin(t * 7.1 + phase * 3.7)
+  );
+}
+
+/** Wind bearing, veering slowly so the scene does not look like a fan. */
+function windYaw(t: number): number {
+  return 0.9 + 0.35 * Math.sin(t * 0.06);
+}
+
+/**
+ * Ease a value towards a target, frame-rate independent.
+ *
+ * Used on every wind and lamp intensity: predictions arrive in steps, and
+ * cutting straight to a new one makes the antenna jump and the lamp pop.
+ */
+function approach(current: number, target: number, delta: number, rate = 1.6): number {
+  return current + (target - current) * Math.min(1, delta * rate);
+}
+
 useGLTF.preload(MODEL_URL);
 
 // ---------------------------------------------------------------------------
 // Antenna
 // ---------------------------------------------------------------------------
 
-function Antenna({ targetAzimuth }: { targetAzimuth: number }) {
+function Antenna({ targetAzimuth, wind }: { targetAzimuth: number; wind: number }) {
   const { scene } = useGLTF(MODEL_URL);
+
+  // The slew target the dish is tracking, kept apart from what it is actually
+  // showing. Wind is added on top when the frame is drawn, so a gust pushes the
+  // dish off aim without the tracking loop chasing its own buffeting.
+  const aim = useRef(0);
+  const strength = useRef(0);
 
   const { root, pivot } = useMemo(() => {
     // Clone so a hot reload -- or a second mount -- never re-parents the dish
@@ -92,11 +155,26 @@ function Antenna({ targetAzimuth }: { targetAzimuth: number }) {
     return { root, pivot };
   }, [scene]);
 
-  useFrame((_, delta) => {
-    const turn = shortestTurn(pivot.rotation.y, targetAzimuth + DISH_AZIMUTH_OFFSET);
+  useFrame((state, delta) => {
+    const turn = shortestTurn(aim.current, targetAzimuth + DISH_AZIMUTH_OFFSET);
     // Ease toward the target but cap the step, so a re-target reads as the dish
     // slewing rather than snapping.
-    pivot.rotation.y += THREE.MathUtils.clamp(turn, -SLEW_SPEED * delta, SLEW_SPEED * delta);
+    aim.current += THREE.MathUtils.clamp(turn, -SLEW_SPEED * delta, SLEW_SPEED * delta);
+
+    strength.current = approach(strength.current, wind, delta);
+    const t = state.clock.elapsedTime;
+    const gustiness = strength.current;
+
+    pivot.rotation.y = aim.current + gust(t, 0) * gustiness * MAX_WIND_YAW;
+    pivot.rotation.x = gust(t, 2.4) * gustiness * MAX_WIND_NOD;
+
+    // The whole assembly leans away from the wind, about its feet: `root` sits
+    // at the origin with the mast standing on it, so rotating it is the mast
+    // flexing rather than the model tipping over.
+    const yaw = windYaw(t);
+    const lean = gustiness * MAX_WIND_LEAN * (0.6 + 0.4 * gust(t, 1.3));
+    root.rotation.x = lean * Math.cos(yaw);
+    root.rotation.z = -lean * Math.sin(yaw);
   });
 
   return <primitive object={root} />;
@@ -132,65 +210,314 @@ function findDish(model: THREE.Object3D): THREE.Object3D | null {
 }
 
 // ---------------------------------------------------------------------------
-// Sensor nodes
+// Wind
 // ---------------------------------------------------------------------------
 
-/** Top of the mast, where the instrument deck sits. */
-const DECK_HEIGHT = 0.95;
-/** Status beacon, kept clear of the tallest sensor on the deck. */
-const BEACON_HEIGHT = DECK_HEIGHT + 1.0;
-
 /**
- * The instruments a node carries, mounted on its deck.
+ * Streaks of air blowing across the station.
  *
- * An environment node reports temperature, humidity *and* pressure, so it gets
- * three models arranged around the mast head; a single-instrument node gets one
- * in the centre, larger. The models keep their own materials -- tinting them by
- * status would throw away the reason for having them, and would force a
- * material clone per node. Status stays where it already was: the pad, the
- * beacon and the selection ring.
+ * One InstancedMesh rather than 72 meshes: this redraws every frame while the
+ * wind is up, and 72 draw calls a frame would cost more than everything else in
+ * the scene put together.
+ *
+ * The streaks are the only thing in the view that shows wind *direction* — the
+ * dish being pushed about tells you there is wind, not which way it is coming
+ * from — so they share windYaw() with the antenna rather than drifting on their
+ * own.
  */
-function SensorRig({ kinds, color }: { kinds: SensorKind[]; color: string }) {
-  const solo = kinds.length <= 1;
-  const deckRadius = solo ? 0.5 : 0.8;
-  const ringRadius = solo ? 0 : 0.4;
-  // Several instruments share the deck, so each is drawn smaller.
-  const scale = solo ? 1 : 0.6;
+function WindField({ intensity, color }: { intensity: number; color: string }) {
+  const meshRef = useRef<THREE.InstancedMesh>(null);
+  const materialRef = useRef<THREE.MeshBasicMaterial>(null);
+  const strength = useRef(0);
+
+  const dummy = useMemo(() => new THREE.Object3D(), []);
+
+  // Fixed per mount: re-randomising on a re-render would make the whole field
+  // twitch every time a prediction arrives.
+  const streaks = useMemo(
+    () =>
+      Array.from({ length: STREAK_COUNT }, () => ({
+        lateral: (Math.random() - 0.5) * STREAK_SPAN * 0.8,
+        height: 0.35 + Math.random() * 13,
+        speed: 6 + Math.random() * 11,
+        offset: Math.random() * STREAK_SPAN,
+        length: 0.8 + Math.random() * 2.6,
+        bob: Math.random() * Math.PI * 2,
+      })),
+    [],
+  );
+
+  useFrame((state, delta) => {
+    const mesh = meshRef.current;
+    if (!mesh) return;
+
+    strength.current = approach(strength.current, intensity, delta);
+    const gustiness = strength.current;
+
+    // Fully faded out: stop paying for the matrix rebuild entirely.
+    mesh.visible = gustiness > 0.01;
+    if (materialRef.current) materialRef.current.opacity = gustiness * 0.55;
+    if (!mesh.visible) return;
+
+    const t = state.clock.elapsedTime;
+    const yaw = windYaw(t);
+    const dirX = Math.sin(yaw);
+    const dirZ = Math.cos(yaw);
+
+    streaks.forEach((streak, index) => {
+      // Wrap within the span so the field is endless without ever growing.
+      const travel =
+        ((streak.offset + t * streak.speed * (0.35 + 0.65 * gustiness)) % STREAK_SPAN) -
+        STREAK_SPAN / 2;
+
+      dummy.position.set(
+        dirX * travel + dirZ * streak.lateral,
+        streak.height + Math.sin(t * 1.4 + streak.bob) * 0.25,
+        dirZ * travel - dirX * streak.lateral,
+      );
+      // The rod is modelled along local +Z, so yawing it by the wind bearing is
+      // all the orientation it needs.
+      dummy.rotation.set(0, yaw, 0);
+      dummy.scale.set(1, 1, streak.length * (0.4 + gustiness));
+      dummy.updateMatrix();
+      mesh.setMatrixAt(index, dummy.matrix);
+    });
+
+    mesh.instanceMatrix.needsUpdate = true;
+  });
 
   return (
-    <group position={[0, DECK_HEIGHT, 0]}>
-      <mesh castShadow receiveShadow>
-        <cylinderGeometry args={[deckRadius, deckRadius * 0.92, 0.08, 24]} />
-        <meshStandardMaterial color="#4b5563" roughness={0.7} metalness={0.3} />
+    <instancedMesh ref={meshRef} args={[undefined, undefined, STREAK_COUNT]} frustumCulled={false}>
+      <boxGeometry args={[0.035, 0.035, 1]} />
+      <meshBasicMaterial
+        ref={materialRef}
+        color={color}
+        transparent
+        opacity={0}
+        // Streaks are atmosphere, not geometry: they must not occlude the
+        // station or each other.
+        depthWrite={false}
+        toneMapped={false}
+      />
+    </instancedMesh>
+  );
+}
+
+/**
+ * The dish's own read-out while wind is loading it.
+ *
+ * Anchored to the antenna rather than to the corner of the canvas, because the
+ * thing it is explaining is the antenna moving.
+ */
+function WindBadge({ prediction }: { prediction: RFPrediction }) {
+  const style = RF_LABEL_STYLE.wind;
+
+  return (
+    <Html
+      position={[0, ANTENNA_HEIGHT * 1.06, 0]}
+      center
+      distanceFactor={20}
+      style={{ pointerEvents: "none" }}
+    >
+      <div
+        className="whitespace-nowrap rounded-lg border px-2.5 py-1.5 text-center backdrop-blur-sm"
+        style={{
+          borderColor: style.color,
+          background: "rgba(10,12,16,.82)",
+          color: "#f8fafc",
+          boxShadow: `0 0 18px ${style.color}55`,
+        }}
+      >
+        <div
+          className="text-[13px] font-semibold uppercase leading-none tracking-wide"
+          style={{ color: style.color }}
+        >
+          Wind on the antenna
+        </div>
+        <div className="mt-1.5 text-[11px] leading-none opacity-85">
+          {formatConfidence(prediction.confidence)} confidence ·{" "}
+          {prediction.reading.wind_speed_mps.toFixed(1)} m/s
+        </div>
+        <div className="mt-1 text-[11px] leading-none opacity-70">
+          Off boresight {prediction.reading.antenna_pointing_error_deg.toFixed(1)}° ·{" "}
+          {formatEta(prediction.eta_seconds)}
+        </div>
+      </div>
+    </Html>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Overheat warning lamp
+// ---------------------------------------------------------------------------
+
+/**
+ * A flashing beacon on a post beside the mast.
+ *
+ * It is a real light, not just an emissive ball: the point of a warning lamp is
+ * that it throws colour onto the hardware around it, so the station itself
+ * turns red and the alert is visible from any camera angle rather than only
+ * when the lamp is in frame.
+ */
+function WarningLamp({
+  active,
+  urgency,
+  color,
+  prediction,
+}: {
+  active: boolean;
+  urgency: number;
+  color: string;
+  prediction: RFPrediction | null;
+}) {
+  const lampRef = useRef<THREE.MeshStandardMaterial>(null);
+  const haloRef = useRef<THREE.MeshBasicMaterial>(null);
+  const ringRef = useRef<THREE.MeshBasicMaterial>(null);
+  const lightRef = useRef<THREE.PointLight>(null);
+
+  const level = useRef(0);
+
+  useFrame((state, delta) => {
+    // Faded rather than switched, so an alert clearing does not look like the
+    // lamp burning out.
+    level.current = approach(level.current, active ? 1 : 0, delta, 2.4);
+    const lit = level.current;
+
+    // 0.8 Hz when there is time to act, up to 3 Hz when it is imminent. Cubed
+    // so the lamp reads as flashing — a plain sine is a lamp fading, which is
+    // a different signal.
+    const rate = 0.8 + urgency * 2.2;
+    const pulse = Math.pow(0.5 + 0.5 * Math.sin(state.clock.elapsedTime * rate * Math.PI * 2), 3);
+
+    if (lampRef.current) {
+      lampRef.current.emissiveIntensity = 0.08 + lit * pulse * (2.4 + urgency * 3.4);
+    }
+    if (haloRef.current) haloRef.current.opacity = lit * pulse * 0.32;
+    if (ringRef.current) ringRef.current.opacity = lit * (0.1 + pulse * 0.35);
+    if (lightRef.current) lightRef.current.intensity = lit * pulse * (14 + urgency * 26);
+  });
+
+  return (
+    <group position={LAMP_POSITION}>
+      {/* Base */}
+      <mesh receiveShadow position={[0, 0.05, 0]}>
+        <cylinderGeometry args={[0.34, 0.4, 0.1, 20]} />
+        <meshStandardMaterial color="#4b5563" roughness={0.85} />
       </mesh>
 
-      {/* A node that has not reported yet gets an anonymous crate: which
-          instruments it carries is exactly what is not known. */}
-      {kinds.length === 0 && (
-        <mesh castShadow position={[0, 0.34, 0]}>
-          <boxGeometry args={[0.6, 0.6, 0.6]} />
-          <meshStandardMaterial color={color} roughness={0.5} metalness={0.15} />
-        </mesh>
-      )}
+      {/* Post */}
+      <mesh castShadow position={[0, LAMP_HEIGHT / 2, 0]}>
+        <cylinderGeometry args={[0.045, 0.055, LAMP_HEIGHT, 10]} />
+        <meshStandardMaterial color="#6b7280" roughness={0.6} metalness={0.4} />
+      </mesh>
 
-      {kinds.map((kind, index) => {
-        const angle = (index / kinds.length) * Math.PI * 2;
-        return (
-          <group
-            key={kind}
-            position={[Math.cos(angle) * ringRadius, 0.04, Math.sin(angle) * ringRadius]}
-            scale={scale}
-            // Face each instrument outward, so three on one deck do not all
-            // present the same side to the camera.
-            rotation={[0, -angle, 0]}
-          >
-            <SensorModel kind={kind} color={color} />
-          </group>
-        );
-      })}
+      {/* Lamp */}
+      <mesh position={[0, LAMP_HEIGHT, 0]}>
+        <sphereGeometry args={[0.19, 20, 16]} />
+        <meshStandardMaterial
+          ref={lampRef}
+          color={color}
+          emissive={color}
+          emissiveIntensity={0.08}
+          roughness={0.35}
+          toneMapped={false}
+        />
+      </mesh>
+
+      {/* Halo — the glow around the bulb, which a bare emissive material does
+          not produce without a bloom pass. */}
+      <mesh position={[0, LAMP_HEIGHT, 0]}>
+        <sphereGeometry args={[0.44, 16, 12]} />
+        <meshBasicMaterial
+          ref={haloRef}
+          color={color}
+          transparent
+          opacity={0}
+          depthWrite={false}
+          toneMapped={false}
+        />
+      </mesh>
+
+      {/* Light cast onto the station */}
+      <pointLight
+        ref={lightRef}
+        position={[0, LAMP_HEIGHT, 0]}
+        color={color}
+        intensity={0}
+        distance={16}
+        decay={2}
+      />
+
+      {/* Pool of light on the ground */}
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.02, 0]}>
+        <circleGeometry args={[1.9, 40]} />
+        <meshBasicMaterial
+          ref={ringRef}
+          color={color}
+          transparent
+          opacity={0}
+          depthWrite={false}
+          toneMapped={false}
+        />
+      </mesh>
+
+      {active && prediction && <LampBadge prediction={prediction} color={color} />}
     </group>
   );
 }
+
+function LampBadge({ prediction, color }: { prediction: RFPrediction; color: string }) {
+  const style = RF_LABEL_STYLE[prediction.label];
+
+  return (
+    <Html
+      position={[0, LAMP_HEIGHT + 0.85, 0]}
+      center
+      distanceFactor={14}
+      style={{ pointerEvents: "none" }}
+    >
+      <div
+        className="whitespace-nowrap rounded-lg border px-2.5 py-1.5 text-center backdrop-blur-sm"
+        style={{
+          borderColor: color,
+          background: "rgba(10,12,16,.85)",
+          color: "#f8fafc",
+          boxShadow: `0 0 20px ${color}66`,
+        }}
+      >
+        <div
+          className="text-[13px] font-semibold uppercase leading-none tracking-wide"
+          style={{ color }}
+        >
+          {style.short}
+        </div>
+        <div className="mt-1.5 text-[11px] leading-none opacity-85">
+          {formatConfidence(prediction.confidence)} confidence ·{" "}
+          {prediction.reading.sdr_temperature_c.toFixed(1)} °C
+        </div>
+        <div className="mt-1 text-[11px] font-medium leading-none" style={{ color }}>
+          {formatEta(prediction.eta_seconds)}
+        </div>
+      </div>
+    </Html>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Sensor nodes
+//
+// A node is a pad, a mast and a beacon -- no instrument models. What a node
+// carries is already written on its label, and drawing it as well cost a GLB
+// per role and put five detailed objects around a station whose subject is the
+// antenna. The state is what has to read at a glance, and state was never in
+// the instruments: it is the pad, the beacon and the selection ring.
+// ---------------------------------------------------------------------------
+
+/** Height of the mast the beacon sits on. */
+const MAST_HEIGHT = 1.6;
+/** Beacon, perched on the mast head. */
+const BEACON_HEIGHT = MAST_HEIGHT + 0.16;
+const BEACON_RADIUS = 0.2;
 
 function SensorNode({
   placement,
@@ -251,16 +578,14 @@ function SensorNode({
       </mesh>
 
       {/* Mast */}
-      <mesh castShadow position={[0, DECK_HEIGHT / 2, 0]}>
-        <cylinderGeometry args={[0.07, 0.09, DECK_HEIGHT, 12]} />
+      <mesh castShadow position={[0, MAST_HEIGHT / 2, 0]}>
+        <cylinderGeometry args={[0.07, 0.09, MAST_HEIGHT, 12]} />
         <meshStandardMaterial color="#6b7280" roughness={0.6} metalness={0.4} />
       </mesh>
 
-      <SensorRig kinds={sensorsForNode(node)} color={style.color} />
-
       {/* Beacon */}
       <mesh position={[0, BEACON_HEIGHT, 0]}>
-        <sphereGeometry args={[0.16, 20, 16]} />
+        <sphereGeometry args={[BEACON_RADIUS, 20, 16]} />
         <meshStandardMaterial
           ref={beaconRef}
           color={style.color}
@@ -373,27 +698,15 @@ function Scene({
   nodes,
   selectedNodeId,
   onSelect,
+  prediction,
 }: {
   nodes: NodeStatus[];
   selectedNodeId: string | null;
   onSelect: (nodeId: string) => void;
+  prediction: RFPrediction | null;
 }) {
   const placements = useMemo(() => placeNodes(nodes), [nodes]);
   const [pulses, setPulses] = useState<Pulse[]>([]);
-
-  // Fetch the models this fleet needs and no others -- preloading the whole
-  // table would spend bandwidth on roles that are not deployed. Keyed on which
-  // roles are present rather than on `nodes`, which is a fresh array every poll
-  // and would otherwise re-run this twelve times a minute for an unchanged fleet.
-  const sensorKey = useMemo(() => sensorKindsInFleet(nodes).sort().join(","), [nodes]);
-
-  useEffect(() => {
-    if (!sensorKey) return;
-    for (const kind of sensorKey.split(",") as SensorKind[]) {
-      const url = SENSOR_MODELS[kind].url;
-      if (url) useGLTF.preload(url);
-    }
-  }, [sensorKey]);
 
   const clockRef = useRef(0);
   const seenRef = useRef(new Map<string, string>());
@@ -460,6 +773,16 @@ function Scene({
     return -(freshest ?? placements[0]).azimuth;
   }, [placements, selectedNodeId]);
 
+  // The model's verdict, turned into the three things the scene can express:
+  // how hard the wind blows, whether the lamp is lit, and how fast it flashes.
+  const wind = windIntensity(prediction);
+  const urgency = thermalUrgency(prediction);
+  const lampLabel = prediction?.label === "degraded" ? "degraded" : "overheating";
+  const lampLit =
+    prediction !== null &&
+    prediction.severity !== "nominal" &&
+    (prediction.label === "overheating" || prediction.label === "degraded");
+
   return (
     <>
       <ambientLight intensity={0.55} />
@@ -476,7 +799,17 @@ function Scene({
       />
       <directionalLight position={[-10, 6, -12]} intensity={0.35} />
 
-      <Antenna targetAzimuth={targetAzimuth} />
+      <Antenna targetAzimuth={targetAzimuth} wind={wind} />
+
+      <WindField intensity={wind} color={RF_LABEL_STYLE.wind.color} />
+      {wind > 0 && prediction && <WindBadge prediction={prediction} />}
+
+      <WarningLamp
+        active={lampLit}
+        urgency={urgency}
+        color={RF_LABEL_STYLE[lampLabel].color}
+        prediction={lampLit ? prediction : null}
+      />
 
       {placements.map((placement) => (
         <SensorNode
@@ -525,10 +858,12 @@ export default function StationScene({
   nodes,
   selectedNodeId,
   onSelect,
+  prediction,
 }: {
   nodes: NodeStatus[];
   selectedNodeId: string | null;
   onSelect: (nodeId: string) => void;
+  prediction: RFPrediction | null;
 }) {
   const { theme } = useTheme();
   const background = theme === "dark" ? "#0b0f16" : "#e7edf5";
@@ -544,7 +879,12 @@ export default function StationScene({
       style={{ background, borderRadius: "0.75rem" }}
     >
       <fog attach="fog" args={[background, 38, 78]} />
-      <Scene nodes={nodes} selectedNodeId={selectedNodeId} onSelect={onSelect} />
+      <Scene
+        nodes={nodes}
+        selectedNodeId={selectedNodeId}
+        onSelect={onSelect}
+        prediction={prediction}
+      />
     </Canvas>
   );
 }

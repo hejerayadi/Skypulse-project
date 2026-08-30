@@ -21,7 +21,7 @@ import threading
 import time
 
 from couchdb import Server
-from couchdb.http import ResourceConflict, ResourceNotFound, Unauthorized
+from couchdb.http import ResourceConflict, ResourceNotFound, ServerError, Unauthorized
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -186,6 +186,229 @@ def ensure_indexes():
         "name": "device_event_timestamp_idx",
     }
     _raw_db.resource.post_json("_index", body=history_index)
+
+    _ensure_history_view()
+
+
+# ---------------------------------------------------------------------------
+# Historical browsing
+#
+# The dashboard's live chart reads the newest N documents, which Mango handles
+# fine. Browsing a month does not work that way: the denoised database holds
+# ~820k documents, and pulling a range out to average it in Python costs
+# seconds and gets worse every day the nodes run.
+#
+# So the buckets are precomputed. This view emits one row per reading keyed by
+# [sensor_id, year, month, day, hour, minute] and reduces with _stats, which
+# means CouchDB keeps min/max/sum/count for every minute in the b-tree and can
+# roll them up to hours or days by changing group_level alone. A month of
+# per-day buckets costs ~20ms and a busy day of per-minute buckets ~170ms,
+# whatever the database grows to.
+#
+# The timestamp is sliced as a string rather than parsed with `new Date()`:
+# every timestamp we store is ISO-8601 UTC, string slicing is much faster over
+# a million documents, and it cannot pick up a timezone from the server.
+# ---------------------------------------------------------------------------
+
+HISTORY_DESIGN_DOC = "_design/history"
+HISTORY_VIEW = "history/by_minute"
+
+# Appended to a sensor id for the pre-denoising series. Every reading is
+# emitted twice — once filtered, once raw — so the dashboard can lay the noise
+# the filters removed over the curve without a second view or a second query
+# shape. `_stats` reduces one number at a time, so two series means two keys.
+RAW_SUFFIX = "__raw"
+
+_HISTORY_MAP = """
+function (doc) {
+  if (!doc.timestamp || !doc.event_type) return;
+
+  var t = doc.timestamp;
+  var year = parseInt(t.substr(0, 4), 10);
+  var month = parseInt(t.substr(5, 2), 10);
+  var day = parseInt(t.substr(8, 2), 10);
+  var hour = parseInt(t.substr(11, 2), 10);
+  var minute = parseInt(t.substr(14, 2), 10);
+  if (!year || isNaN(minute)) return;
+
+  var when = [year, month, day, hour, minute];
+
+  function put(id, value) {
+    if (typeof value === 'number' && isFinite(value)) emit([id].concat(when), value);
+  }
+
+  // The denoised documents keep the original reading in `value` and the
+  // filtered one in `filtered_value`, so both series come from one document.
+  function pair(id, sensor) {
+    if (!sensor) return;
+
+    var raw = sensor.value;
+    var filtered = sensor.filtered_value;
+    if (typeof filtered !== 'number') filtered = raw;
+
+    put(id, filtered);
+    put(id + '__raw', raw);
+  }
+
+  if (doc.event_type === 'environment') {
+    pair('temperature', doc.temperature);
+    pair('humidity', doc.humidity);
+    pair('pressure', doc.pressure);
+  } else if (doc.event_type === 'acoustic') {
+    pair('acoustic', doc.sound);
+  } else if (doc.event_type === 'motion') {
+    // Motion is the exception: the denoiser rewrites accel_x/y/z in place and
+    // leaves `magnitude` as the raw reading. So the filtered magnitude has to
+    // be recomputed from the filtered components — reading `magnitude` for
+    // both would draw the same line twice.
+    var a = doc.accelerometer;
+    if (a) {
+      put('motion__raw', a.magnitude);
+      if (typeof a.accel_x === 'number' && typeof a.accel_y === 'number' &&
+          typeof a.accel_z === 'number') {
+        put('motion', Math.sqrt(a.accel_x * a.accel_x + a.accel_y * a.accel_y +
+                                a.accel_z * a.accel_z));
+      }
+    }
+  }
+}
+""".strip()
+
+# How many trailing key elements each granularity keeps. 1 is the sensor id
+# alone (totals), 6 is down to the minute.
+GROUP_LEVELS = {"year": 2, "month": 3, "day": 4, "hour": 5, "minute": 6}
+
+
+class HistoryIndexBuilding(Exception):
+    """
+    The view is still building.
+
+    Only ever happens once per database — CouchDB builds the index on first
+    read, and over ~820k documents that takes a few minutes and outlives the
+    HTTP request that triggered it. Raised rather than swallowed so the API can
+    answer 503 "come back shortly" instead of an empty chart that looks like
+    missing data.
+    """
+
+
+def _ensure_history_view() -> None:
+    """
+    Create or update the history design doc.
+
+    Written only when it differs: saving an unchanged design doc still bumps
+    its _rev, and CouchDB throws away and rebuilds the whole index whenever the
+    design doc changes. Doing that on every reconnect would mean rebuilding a
+    million rows because the backend restarted.
+    """
+
+    existing = _denoised_db.get(HISTORY_DESIGN_DOC)
+
+    if existing is not None:
+        view = (existing.get("views") or {}).get("by_minute") or {}
+        if view.get("map") == _HISTORY_MAP and view.get("reduce") == "_stats":
+            return
+        print("History view definition changed — CouchDB will rebuild the index.")
+
+    document = {
+        "_id": HISTORY_DESIGN_DOC,
+        "language": "javascript",
+        "views": {"by_minute": {"map": _HISTORY_MAP, "reduce": "_stats"}},
+    }
+    if existing is not None:
+        document["_rev"] = existing["_rev"]
+
+    _denoised_db.save(document)
+    print("History view created — the first query builds the index.")
+
+
+def _history_key(sensor_id: str, when, upper: bool = False) -> list:
+    """
+    A view key for one instant.
+
+    An open bound becomes the sensor id alone at the low end, and the id plus
+    an empty object at the high end — `{}` sorts after every number and array
+    in CouchDB's collation, so it means "everything for this sensor".
+    """
+
+    if when is None:
+        return [sensor_id, {}] if upper else [sensor_id]
+
+    return [sensor_id, when.year, when.month, when.day, when.hour, when.minute]
+
+
+def _view_rows(**options) -> list:
+    try:
+        return list(get_denoised_db().view(HISTORY_VIEW, **options))
+    except ServerError as e:
+        # (500, ('timeout', ...)) while the index builds.
+        if "timeout" in str(e):
+            raise HistoryIndexBuilding(
+                "The history index is still building. This happens once, and "
+                "takes a few minutes over a large database — retry shortly."
+            ) from e
+        raise
+    except ResourceNotFound as e:
+        # The design doc was deleted out from under us; recreate and let the
+        # caller retry rather than failing every request from here on.
+        _ensure_history_view()
+        raise HistoryIndexBuilding(
+            "The history view was missing and has been recreated — retry shortly."
+        ) from e
+
+
+def get_history_buckets(sensor_id: str, start, end, granularity: str) -> list[tuple]:
+    """
+    Bucketed min/max/avg for one sensor over a time range.
+
+    Returns (key, stats) pairs where key is [sensor_id, year, month, ...]
+    truncated to the granularity, and stats is CouchDB's _stats output.
+    """
+
+    return [
+        (row.key, row.value)
+        for row in _view_rows(
+            group_level=GROUP_LEVELS[granularity],
+            startkey=_history_key(sensor_id, start),
+            endkey=_history_key(sensor_id, end, upper=True),
+            # Half-open, so back-to-back ranges neither overlap nor gap.
+            inclusive_end=False,
+        )
+    ]
+
+
+def get_history_extent(sensor_id: str) -> dict | None:
+    """
+    The oldest and newest reading held for a sensor, and how many there are.
+
+    This is what lets the UI bound its date picker to the data that exists
+    rather than offering a calendar of empty days.
+    """
+
+    totals = _view_rows(group_level=1, startkey=[sensor_id], endkey=[sensor_id, {}])
+    if not totals or not totals[0].value.get("count"):
+        return None
+
+    stats = totals[0].value
+
+    bounds = {}
+    for name, descending in (("oldest", False), ("newest", True)):
+        rows = _view_rows(
+            group_level=6,
+            startkey=_history_key(sensor_id, None, upper=descending),
+            endkey=_history_key(sensor_id, None, upper=not descending),
+            descending=descending,
+            limit=1,
+        )
+        bounds[name] = rows[0].key[1:] if rows else None
+
+    return {
+        "count": stats["count"],
+        "min": stats["min"],
+        "max": stats["max"],
+        "avg": stats["sum"] / stats["count"],
+        "oldest": bounds["oldest"],
+        "newest": bounds["newest"],
+    }
 
 
 def get_document_counts():

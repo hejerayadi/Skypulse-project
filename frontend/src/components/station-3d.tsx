@@ -1,6 +1,8 @@
-import { Suspense, lazy, useEffect, useMemo, useState } from "react";
+import { Suspense, lazy, useEffect, useState } from "react";
 import type { NodeStatus } from "@/lib/nodes";
-import { ANTENNA_CREDIT, creditsInFleet, type ModelCredit } from "@/lib/sensor-models";
+import { ANTENNA_CREDIT, type ModelCredit } from "@/lib/sensor-models";
+import { RFAlertPanel } from "@/components/rf-alert-panel";
+import type { RFPrediction } from "@/lib/rf-fault";
 
 // three.js and its React bindings are the largest dependency in the app and
 // are useless during SSR, so the whole scene is a lazy chunk. This also keeps
@@ -12,6 +14,10 @@ type Station3DProps = {
   nodes: NodeStatus[];
   selectedNodeId?: string | null;
   onSelect?: (nodeId: string) => void;
+  /** Owned by the page, because the AI note beside the canvas reads it too. */
+  prediction: RFPrediction | null;
+  connected: boolean;
+  rfError: string | null;
 };
 
 function Overlay({ children }: { children: React.ReactNode }) {
@@ -25,13 +31,14 @@ function Overlay({ children }: { children: React.ReactNode }) {
 /**
  * Attribution for the models currently on screen.
  *
- * Every sensor model is CC-licensed, and CC-BY's condition is that the notice
- * travels with the work -- burying it in a source comment does not satisfy it.
- * A `<details>` keeps it out of the way without hiding it, and needs no state.
+ * The antenna is the only one left -- nodes are drawn as pads and beacons now,
+ * so the per-role sensor models are no longer displayed and no longer need a
+ * notice. CC-BY's condition is that the notice travels with the work, and
+ * burying it in a source comment does not satisfy it, so this stays for as
+ * long as the antenna is on screen. A `<details>` keeps it out of the way
+ * without hiding it, and needs no state.
  */
-function ModelCredits({ nodes }: { nodes: NodeStatus[] }) {
-  const credits = useMemo(() => creditsInFleet(nodes), [nodes]);
-
+function ModelCredits() {
   return (
     <details className="group absolute bottom-1.5 right-2 max-w-[min(22rem,calc(100%-1rem))] text-[10px]">
       <summary className="cursor-pointer list-none text-right text-muted-foreground/70 transition-colors hover:text-muted-foreground">
@@ -42,12 +49,6 @@ function ModelCredits({ nodes }: { nodes: NodeStatus[] }) {
         <li className="text-muted-foreground">
           {ANTENNA_CREDIT ? <Credit credit={ANTENNA_CREDIT} /> : <>Antenna — source not recorded</>}
         </li>
-        {credits.map((credit) => (
-          <li key={credit.modelUrl} className="text-muted-foreground">
-            <Credit credit={credit} />
-            {credit.note && <span className="block opacity-60">{credit.note}</span>}
-          </li>
-        ))}
       </ul>
     </details>
   );
@@ -78,7 +79,14 @@ function Credit({ credit }: { credit: ModelCredit }) {
   );
 }
 
-export function Station3D({ nodes, selectedNodeId = null, onSelect }: Station3DProps) {
+export function Station3D({
+  nodes,
+  selectedNodeId = null,
+  onSelect,
+  prediction,
+  connected,
+  rfError,
+}: Station3DProps) {
   // `mounted` gates the canvas on the client: a WebGL context cannot be created
   // during the server pass, and hydrating one that never existed throws.
   const [mounted, setMounted] = useState(false);
@@ -86,13 +94,14 @@ export function Station3D({ nodes, selectedNodeId = null, onSelect }: Station3DP
   useEffect(() => setMounted(true), []);
 
   return (
-    <div className="relative h-[26rem] w-full overflow-hidden rounded-xl">
+    <div data-tour="station-3d" className="relative h-[26rem] w-full overflow-hidden rounded-xl">
       {mounted && (
         <Suspense fallback={null}>
           <StationScene
             nodes={nodes}
             selectedNodeId={selectedNodeId}
             onSelect={onSelect ?? (() => {})}
+            prediction={prediction}
           />
         </Suspense>
       )}
@@ -100,7 +109,9 @@ export function Station3D({ nodes, selectedNodeId = null, onSelect }: Station3DP
       {!mounted && <Overlay>Loading ground station…</Overlay>}
       {mounted && nodes.length === 0 && <Overlay>No node has reported yet.</Overlay>}
 
-      <ModelCredits nodes={nodes} />
+      {mounted && <RFAlertPanel prediction={prediction} connected={connected} error={rfError} />}
+
+      <ModelCredits />
     </div>
   );
 }

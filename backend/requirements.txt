@@ -18,3 +18,13 @@ email-validator
 # MQTT ingest: Node-RED publishes telemetry to Mosquitto and
 # app/mqtt.py subscribes to it.
 paho-mqtt
+
+# RF fault detection. The pickles in app/time series model/ were written by
+# scikit-learn 1.6.1 — loading them under a different minor version works but
+# warns, and the tree internals are not guaranteed to survive a major bump.
+scikit-learn==1.6.1
+joblib
+
+# AI interpretations for the dashboard charts. The key lives in backend/.env
+# as `groq_model`; app/ai/client.py also accepts GROQ_API_KEY.
+groq

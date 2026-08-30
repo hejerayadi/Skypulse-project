@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import type { SensorMeta } from "@/lib/sensors";
 
-export type SensorPoint = { t: number; v: number };
+/** `raw` is the reading before denoising; null when the packet carried none. */
+export type SensorPoint = { t: number; v: number; raw?: number | null };
 
 type TelemetrySeriesResponse = {
   sensor_id: string;

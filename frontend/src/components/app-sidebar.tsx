@@ -37,7 +37,7 @@ export function AppSidebar() {
   }
 
   return (
-    <Sidebar collapsible="icon">
+    <Sidebar collapsible="icon" data-tour="app-sidebar">
       <SidebarHeader>
         <div className="flex items-center gap-2 px-2 py-2">
           <div
@@ -69,7 +69,11 @@ export function AppSidebar() {
                 </SidebarMenuButton>
               </SidebarMenuItem>
               <SidebarMenuItem>
-                <SidebarMenuButton asChild isActive={isActive("/dashboard/nodes")} tooltip="Node map">
+                <SidebarMenuButton
+                  asChild
+                  isActive={isActive("/dashboard/nodes")}
+                  tooltip="Node map"
+                >
                   <Link to="/dashboard/nodes">
                     <Map className="h-4 w-4" />
                     <span>Node map</span>
@@ -88,7 +92,11 @@ export function AppSidebar() {
                 const Icon = s.icon;
                 return (
                   <SidebarMenuItem key={s.id}>
-                    <SidebarMenuButton asChild isActive={isActive(`/dashboard/${s.id}`)} tooltip={s.name}>
+                    <SidebarMenuButton
+                      asChild
+                      isActive={isActive(`/dashboard/${s.id}`)}
+                      tooltip={s.name}
+                    >
                       <Link to="/dashboard/$sensor" params={{ sensor: s.id }}>
                         <Icon className="h-4 w-4" />
                         <span>{s.name}</span>

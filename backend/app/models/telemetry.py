@@ -186,6 +186,10 @@ class NodeFleet(BaseModel):
 class TelemetryPoint(BaseModel):
     t: int
     v: float
+    # The reading before denoising. None when the packet carried no raw value
+    # to compare against, so the chart can skip the point rather than draw a
+    # zero. Equal to `v` for sensors whose filter is a no-op.
+    raw: float | None = None
 
 
 class TelemetrySeries(BaseModel):
